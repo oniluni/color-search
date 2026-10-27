@@ -1,7 +1,8 @@
 package dev.oni.colorsearch;
 
-import it.unimi.dsi.fastutil.ints.Int2FloatMap;
-import it.unimi.dsi.fastutil.ints.Int2FloatOpenHashMap;
+import it.unimi.dsi.fastutil.ints.Int2DoubleOpenHashMap;
+import it.unimi.dsi.fastutil.ints.Int2IntMap;
+import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
 import java.util.List;
 import java.util.Optional;
 import net.minecraft.util.ARGB;
@@ -63,62 +64,74 @@ public final class PixelClassifier {
 	}
 
 	/**
-	 * Fraction of opaque pixels per color mask: the key is the set of colors and shades a pixel counts as
-	 * (see {@link #maskOf}), so overlapping colors can be combined without double counting.
+	 * Color statistics of the opaque pixels, keyed by the set of colors and shades each pixel counts
+	 * as (see {@link #maskOf}), so overlapping colors can be combined without double counting.
 	 * Every pixel is multiplied by {@code tint} first (use {@code -1} for no tint).
 	 * Empty when the pixels contain nothing opaque.
 	 */
-	public static Optional<Int2FloatMap> histogram(int[] argbPixels, int tint) {
-		Int2FloatOpenHashMap counts = new Int2FloatOpenHashMap();
+	static Optional<ColorProfile> histogram(int[] argbPixels, int tint) {
+		Int2IntOpenHashMap counts = new Int2IntOpenHashMap();
+		Int2DoubleOpenHashMap lightnessSums = new Int2DoubleOpenHashMap();
 		int opaque = 0;
 		for (int pixel : argbPixels) {
 			if (ARGB.alpha(pixel) < OPAQUE_ALPHA) {
 				continue;
 			}
 			opaque++;
-			int mask = colorMask(ARGB.multiply(pixel, tint));
-			if (mask != 0) {
-				counts.addTo(mask, 1);
-			}
+			Oklch color = Oklch.of(ARGB.multiply(pixel, tint));
+			int mask = colorMask(color);
+			counts.addTo(mask, 1);
+			lightnessSums.addTo(mask, color.lightness());
 		}
 		if (opaque == 0) {
 			return Optional.empty();
 		}
-		for (Int2FloatMap.Entry entry : counts.int2FloatEntrySet()) {
-			entry.setValue(entry.getFloatValue() / opaque);
+		ColorProfile profile = new ColorProfile();
+		for (Int2IntMap.Entry entry : counts.int2IntEntrySet()) {
+			int mask = entry.getIntKey();
+			profile.add(mask, (float) entry.getIntValue() / opaque, (float) (lightnessSums.get(mask) / opaque));
 		}
-		return Optional.of(counts);
+		return Optional.of(profile);
 	}
 
-	private static int colorMask(int argb) {
-		// sRGB → OKLab → OKLCh, per https://bottosson.github.io/posts/oklab/
-		double r = SRGB_TO_LINEAR[ARGB.red(argb)];
-		double g = SRGB_TO_LINEAR[ARGB.green(argb)];
-		double b = SRGB_TO_LINEAR[ARGB.blue(argb)];
-		double l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
-		double m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
-		double s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
-		double lightness = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
-		double labA = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
-		double labB = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
-		double chroma = Math.hypot(labA, labB);
-		double hue = Math.toDegrees(Math.atan2(labB, labA));
-		if (hue < 0) {
-			hue += 360;
-		}
+	/** OKLab lightness of an ARGB color, 0 (black) to 1 (white). */
+	public static double lightness(int argb) {
+		return Oklch.of(argb).lightness();
+	}
 
+	private static int colorMask(Oklch color) {
 		int mask = 0;
 		for (DyeRegion dyeRegion : DYE_REGIONS) {
-			if (dyeRegion.region().contains(hue, chroma, lightness)) {
+			if (dyeRegion.region().contains(color.hue(), color.chroma(), color.lightness())) {
 				mask |= maskOf(dyeRegion.color());
 			}
 		}
 		for (Shade shade : Shade.values()) {
-			if ((mask & maskOf(shade.parent())) != 0 && shade.contains(hue, chroma, lightness)) {
+			if ((mask & maskOf(shade.parent())) != 0 && shade.contains(color.hue(), color.chroma(), color.lightness())) {
 				mask |= maskOf(shade);
 			}
 		}
 		return mask;
+	}
+
+	private record Oklch(double lightness, double chroma, double hue) {
+		// sRGB → OKLab → OKLCh, per https://bottosson.github.io/posts/oklab/
+		static Oklch of(int argb) {
+			double r = SRGB_TO_LINEAR[ARGB.red(argb)];
+			double g = SRGB_TO_LINEAR[ARGB.green(argb)];
+			double b = SRGB_TO_LINEAR[ARGB.blue(argb)];
+			double l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+			double m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+			double s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+			double labA = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+			double labB = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+			double hue = Math.toDegrees(Math.atan2(labB, labA));
+			return new Oklch(
+				0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+				Math.hypot(labA, labB),
+				hue < 0 ? hue + 360 : hue
+			);
+		}
 	}
 
 	private static DyeRegion dye(

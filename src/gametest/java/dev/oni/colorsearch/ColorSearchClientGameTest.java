@@ -56,9 +56,9 @@ public final class ColorSearchClientGameTest implements FabricClientGameTest {
 			results.put("жёлтый", check(failures, context, input, "жёлтый",
 				List.of("yellow_wool", "gold_block", "sand", "sponge", "hay_block", "bamboo_planks"),
 				List.of("stone", "lapis_block", "white_banner", "red_bed")));
-			check(failures, context, input, "коричневый",
+			results.put("коричневый", check(failures, context, input, "коричневый",
 				List.of("brown_wool", "brown_terracotta", "dirt", "spruce_planks", "dark_oak_planks", "mud_bricks"),
-				List.of("stone", "lapis_block", "white_banner"));
+				List.of("stone", "lapis_block", "white_banner")));
 			results.put("лаймовый", check(failures, context, input, "лаймовый", List.of("lime_wool", "slime_block", "emerald_block"), List.of("stone")));
 			results.put("зелёный", check(failures, context, input, "Зелёный",
 				List.of("grass_block", "oak_leaves", "lime_wool", "green_wool", "moss_block", "emerald_block", "cactus"),
@@ -84,9 +84,21 @@ public final class ColorSearchClientGameTest implements FabricClientGameTest {
 			check(failures, context, input, "чёрный",
 				List.of("black_wool", "obsidian", "coal_block", "blackstone"), List.of("snow_block"));
 			// English queries add color matches after vanilla's name matches.
-			check(failures, context, input, "blue", List.of("lapis_block", "blue_wool", "light_blue_concrete", "ice"), List.of("stone"));
+			results.put("blue", check(failures, context, input, "blue",
+				List.of("lapis_block", "blue_wool", "light_blue_concrete", "ice", "blue_dye"), List.of("stone")));
 			check(failures, context, input, "red", List.of("red_wool", "bricks", "mangrove_planks"), List.of("stone"));
 			check(failures, context, input, "blu", List.of(), List.of("lapis_block", "grass_block"));
+
+			// Color blocks run from lightest to darkest; plain name matches (dyes) come after them.
+			checkOrder(failures, "серый", results.get("серый"), "light_gray_wool", "gray_wool");
+			checkOrder(failures, "серый", results.get("серый"), "stone", "deepslate");
+			checkOrder(failures, "красный", results.get("красный"), "pink_wool", "red_wool");
+			checkOrder(failures, "красный", results.get("красный"), "red_wool", "nether_bricks");
+			checkOrder(failures, "зелёный", results.get("зелёный"), "lime_wool", "green_wool");
+			checkOrder(failures, "коричневый", results.get("коричневый"), "oak_planks", "dark_oak_planks");
+			checkOrder(failures, "blue", results.get("blue"), "light_blue_wool", "blue_wool");
+			checkOrder(failures, "blue", results.get("blue"), "ice", "lapis_block");
+			checkOrder(failures, "blue", results.get("blue"), "lapis_block", "blue_dye");
 
 			// A shade finds a non-empty subset of what its main color finds, and less than all of it.
 			Map<String, String> parentByShade = new LinkedHashMap<>();
@@ -149,6 +161,16 @@ public final class ColorSearchClientGameTest implements FabricClientGameTest {
 		});
 		LOG.info("Query '{}' shows {} items: {}", query, shown.size(), shown);
 		return new LinkedHashSet<>(shown);
+	}
+
+	private static void checkOrder(List<String> failures, String query, Set<String> shown, String earlier, String later) {
+		List<String> order = List.copyOf(shown);
+		int earlierIndex = order.indexOf(earlier);
+		int laterIndex = order.indexOf(later);
+		if (earlierIndex < 0 || laterIndex < 0 || earlierIndex > laterIndex) {
+			failures.add("Query '" + query + "' should list " + earlier + " (at " + earlierIndex + ") before "
+				+ later + " (at " + laterIndex + ")");
+		}
 	}
 
 	private static Set<String> check(

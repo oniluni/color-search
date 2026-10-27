@@ -2,8 +2,9 @@
 
 A client-side Fabric mod for Minecraft 26.3 that lets the creative search tab find blocks by color.
 
-Type a color word, in English or Russian, and after the usual name matches the tab lists every
-block with at least 25% of its texture in that color, the most colorful first.
+Type a color word, in English or Russian, and the tab lists every block with at least 25% of its
+texture in that color, from the lightest to the darkest shade of it, followed by the remaining
+name matches (dyes, bundles, …).
 
 - **Main colors** are the 16 dye colors: `red` / `красный`, `light blue` / `голубой`, `lime` /
   `лаймовый`, … Russian words work in any gender and number (`синий`, `синяя`, `синие`).

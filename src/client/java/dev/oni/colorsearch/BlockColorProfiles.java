@@ -1,8 +1,6 @@
 package dev.oni.colorsearch;
 
 import com.mojang.blaze3d.platform.NativeImage;
-import it.unimi.dsi.fastutil.ints.Int2FloatMap;
-import it.unimi.dsi.fastutil.ints.Int2FloatOpenHashMap;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -12,6 +10,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.color.block.BlockTintSource;
 import net.minecraft.client.renderer.block.BlockStateModelSet;
@@ -33,8 +32,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * How much of each dye color a block's model textures contain, computed lazily from the
- * loaded resource packs and cached until the block models are reloaded. Render thread only.
+ * How much of each dye color a block's model textures contain and how light those pixels are,
+ * computed lazily from the loaded resource packs and cached until the block models are reloaded.
+ * Render thread only.
  */
 public final class BlockColorProfiles {
 	/** Minimum share of pixels matching the queried colors for a block to count as that color. */
@@ -49,9 +49,8 @@ public final class BlockColorProfiles {
 		Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST, null
 	};
 
-	// Values map a color mask (PixelClassifier.maskOf) to the share of pixels matching exactly those colors.
-	private static final Map<Item, Int2FloatMap> SHARES_BY_ITEM = new HashMap<>();
-	private static final Map<SpriteTint, Optional<Int2FloatMap>> SHARES_BY_SPRITE = new HashMap<>();
+	private static final Map<Item, ColorProfile> PROFILES_BY_ITEM = new HashMap<>();
+	private static final Map<SpriteTint, Optional<ColorProfile>> PROFILES_BY_SPRITE = new HashMap<>();
 	private static BlockStateModelSet profiledModels;
 
 	private BlockColorProfiles() {
@@ -59,39 +58,50 @@ public final class BlockColorProfiles {
 
 	/**
 	 * Blocks among {@code candidates} named after one of the query's dyes (blue_terracotta, red_bed)
-	 * or with at least {@link #MIN_SHARE} of their texture pixels in the query's colors; named ones
-	 * first, then the most colorful.
+	 * or with at least {@link #MIN_SHARE} of their texture pixels in the query's colors, from the
+	 * lightest to the darkest shade of those colors.
 	 */
 	public static List<ItemStack> matching(Collection<ItemStack> candidates, ColorQuery query) {
 		Minecraft minecraft = Minecraft.getInstance();
 		resetIfModelsReloaded(minecraft);
 
 		long startNanos = System.nanoTime();
-		int cachedBefore = SHARES_BY_ITEM.size();
-		List<ItemStack> named = new ArrayList<>();
-		List<ItemStack> colorful = new ArrayList<>();
-		Map<Item, Float> shareByItem = new HashMap<>();
+		int cachedBefore = PROFILES_BY_ITEM.size();
+		List<Match> matches = new ArrayList<>();
 		for (ItemStack stack : candidates) {
 			if (!(stack.getItem() instanceof BlockItem blockItem) || !isBlockOfSameName(blockItem)) {
 				continue;
 			}
-			if (isNamedAfter(blockItem, query.namedDyes())) {
-				named.add(stack);
-				continue;
-			}
-			float share = shareOf(SHARES_BY_ITEM.computeIfAbsent(blockItem, item -> profile(minecraft, blockItem)), query.pixelMask());
-			if (share >= MIN_SHARE) {
-				colorful.add(stack);
-				shareByItem.put(blockItem, share);
+			Optional<DyeColor> namedDye = namedDye(blockItem, query.namedDyes());
+			ColorProfile profile = PROFILES_BY_ITEM.computeIfAbsent(blockItem, item -> profile(minecraft, blockItem));
+			if (namedDye.isPresent() || profile.share(query.pixelMask()) >= MIN_SHARE) {
+				matches.add(new Match(stack, sortLightness(profile, query.pixelMask(), namedDye)));
 			}
 		}
-		int profiled = SHARES_BY_ITEM.size() - cachedBefore;
+		int profiled = PROFILES_BY_ITEM.size() - cachedBefore;
 		if (profiled > 0) {
 			LOG.info("[Color Search] Profiled {} blocks in {} ms", profiled, (System.nanoTime() - startNanos) / 1_000_000);
 		}
-		colorful.sort(Comparator.comparing((ItemStack stack) -> shareByItem.get(stack.getItem())).reversed());
-		named.addAll(colorful);
-		return named;
+		matches.sort(Comparator.comparingDouble(Match::lightness).reversed());
+		return matches.stream().map(Match::stack).toList();
+	}
+
+	/**
+	 * How light the block's queried color is: the mean lightness of its pixels in those colors.
+	 * Dye-named blocks may have none (blue terracotta's texture is purple-grey), so they fall back
+	 * to the whole texture, and beds and banners, which have no texture to read, to their dye.
+	 */
+	private static double sortLightness(ColorProfile profile, int colorMask, Optional<DyeColor> namedDye) {
+		OptionalDouble colorLightness = profile.lightness(colorMask);
+		if (colorLightness.isPresent()) {
+			return colorLightness.getAsDouble();
+		}
+		OptionalDouble overallLightness = profile.overallLightness();
+		if (overallLightness.isPresent()) {
+			return overallLightness.getAsDouble();
+		}
+		// Only dye-named blocks get here: any other match has pixels in the queried colors.
+		return PixelClassifier.lightness(namedDye.orElseThrow().getTextureDiffuseColor());
 	}
 
 	// Seeds, carrots, redstone dust and the like place a differently named block whose model
@@ -102,51 +112,41 @@ public final class BlockColorProfiles {
 
 	// Dyed blocks keep their dye in the id even when the texture disagrees: blue terracotta is
 	// purple-grey, beds and banners have no block model to read.
-	private static boolean isNamedAfter(BlockItem item, Collection<DyeColor> colors) {
+	private static Optional<DyeColor> namedDye(BlockItem item, Collection<DyeColor> colors) {
 		String path = BuiltInRegistries.ITEM.getKey(item).getPath();
 		for (DyeColor color : colors) {
 			if (path.startsWith(color.getName() + "_")) {
-				return true;
+				return Optional.of(color);
 			}
 		}
-		return false;
-	}
-
-	private static float shareOf(Int2FloatMap shares, int colorMask) {
-		float share = 0;
-		for (Int2FloatMap.Entry entry : shares.int2FloatEntrySet()) {
-			if ((entry.getIntKey() & colorMask) != 0) {
-				share += entry.getFloatValue();
-			}
-		}
-		return share;
+		return Optional.empty();
 	}
 
 	private static void resetIfModelsReloaded(Minecraft minecraft) {
 		BlockStateModelSet models = minecraft.getModelManager().getBlockStateModelSet();
 		if (models != profiledModels) {
-			SHARES_BY_ITEM.clear();
-			SHARES_BY_SPRITE.clear();
+			PROFILES_BY_ITEM.clear();
+			PROFILES_BY_SPRITE.clear();
 			profiledModels = models;
 		}
 	}
 
-	/** Average of the per-quad color shares over every textured quad of the block's default state. */
-	private static Int2FloatMap profile(Minecraft minecraft, BlockItem item) {
+	/** Average of the per-quad color profiles over every textured quad of the block's default state. */
+	private static ColorProfile profile(Minecraft minecraft, BlockItem item) {
 		BlockState state = item.getBlock().defaultBlockState();
 		List<BlockStateModelPart> parts = new ArrayList<>();
 		profiledModels.get(state).collectParts(RandomSource.create(MODEL_SEED), parts);
 
-		Int2FloatOpenHashMap total = new Int2FloatOpenHashMap();
+		ColorProfile total = new ColorProfile();
 		int texturedQuads = 0;
 		for (BlockStateModelPart part : parts) {
 			for (Direction face : FACES_AND_UNCULLED) {
 				for (BakedQuad quad : part.getQuads(face)) {
 					BakedQuad.MaterialInfo material = quad.materialInfo();
 					int tint = material.isTinted() ? tintColor(minecraft, state, material.tintIndex()) : NO_TINT;
-					Optional<Int2FloatMap> shares = spriteShares(minecraft, material.sprite(), tint);
-					if (shares.isPresent()) {
-						add(total, shares.get());
+					Optional<ColorProfile> quadProfile = spriteProfile(minecraft, material.sprite(), tint);
+					if (quadProfile.isPresent()) {
+						total.addAll(quadProfile.get());
 						texturedQuads++;
 					}
 				}
@@ -155,25 +155,17 @@ public final class BlockColorProfiles {
 		// Chests, signs, shulker boxes and the like render through block entities and have no quads;
 		// their particle texture stands in. Not for beds and banners: their particle is plain planks,
 		// and their dye name already places them.
-		if (texturedQuads == 0 && !isNamedAfter(item, DyeColor.VALUES)) {
-			Optional<Int2FloatMap> particle = spriteShares(minecraft, profiledModels.getParticleMaterial(state).sprite(), NO_TINT);
+		if (texturedQuads == 0 && namedDye(item, DyeColor.VALUES).isEmpty()) {
+			Optional<ColorProfile> particle = spriteProfile(minecraft, profiledModels.getParticleMaterial(state).sprite(), NO_TINT);
 			if (particle.isPresent()) {
-				add(total, particle.get());
+				total.addAll(particle.get());
 				texturedQuads = 1;
 			}
 		}
 		if (texturedQuads > 1) {
-			for (Int2FloatMap.Entry entry : total.int2FloatEntrySet()) {
-				entry.setValue(entry.getFloatValue() / texturedQuads);
-			}
+			total.scale(1f / texturedQuads);
 		}
 		return total;
-	}
-
-	private static void add(Int2FloatOpenHashMap total, Int2FloatMap shares) {
-		for (Int2FloatMap.Entry entry : shares.int2FloatEntrySet()) {
-			total.addTo(entry.getIntKey(), entry.getFloatValue());
-		}
 	}
 
 	private static int tintColor(Minecraft minecraft, BlockState state, int tintIndex) {
@@ -181,9 +173,9 @@ public final class BlockColorProfiles {
 		return source == null ? NO_TINT : source.color(state);
 	}
 
-	private static Optional<Int2FloatMap> spriteShares(Minecraft minecraft, TextureAtlasSprite sprite, int tint) {
+	private static Optional<ColorProfile> spriteProfile(Minecraft minecraft, TextureAtlasSprite sprite, int tint) {
 		SpriteContents contents = sprite.contents();
-		return SHARES_BY_SPRITE.computeIfAbsent(
+		return PROFILES_BY_SPRITE.computeIfAbsent(
 			new SpriteTint(contents.name(), tint),
 			key -> readFirstFrame(minecraft, contents).flatMap(pixels -> PixelClassifier.histogram(pixels, tint))
 		);
@@ -218,5 +210,8 @@ public final class BlockColorProfiles {
 	}
 
 	private record SpriteTint(Identifier sprite, int tint) {
+	}
+
+	private record Match(ItemStack stack, double lightness) {
 	}
 }
