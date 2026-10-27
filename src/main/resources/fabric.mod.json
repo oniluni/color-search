@@ -1,0 +1,22 @@
+{
+	"schemaVersion": 1,
+	"id": "colorsearch",
+	"version": "${version}",
+	"name": "Color Search",
+	"description": "Search blocks by their dominant color in the creative search tab: type \"blue\" or \"синий\". The search tab lists only items that existed in Minecraft 1.21.11.",
+	"authors": ["oni"],
+	"contact": {
+		"sources": "https://github.com/oniluni/color-search",
+		"issues": "https://github.com/oniluni/color-search/issues"
+	},
+	"license": "MIT",
+	"environment": "client",
+	"mixins": [
+		{"config": "colorsearch.client.mixins.json", "environment": "client"}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25"
+	}
+}

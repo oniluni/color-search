@@ -1,0 +1,13 @@
+{
+	"schemaVersion": 1,
+	"id": "colorsearch-gametest",
+	"version": "0.0.0",
+	"name": "Color Search client game tests",
+	"environment": "client",
+	"entrypoints": {
+		"fabric-client-gametest": ["dev.oni.colorsearch.ColorSearchClientGameTest"]
+	},
+	"depends": {
+		"colorsearch": "*"
+	}
+}
